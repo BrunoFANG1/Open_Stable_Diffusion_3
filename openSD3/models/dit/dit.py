@@ -3,7 +3,13 @@ import torch.nn as nn
 import einops
 import clip
 import numpy as np
-from openSD3.models.layers.blocks import modulate, RMSNorm, MultiHeadAttention, FinalLayer
+from openSD3.models.layers.blocks import (
+    modulate,
+    RMSNorm,
+    MultiHeadAttention, 
+    FinalLayer,
+    TimestepEmbedder,
+)
 
 from transformers import (
     CLIPProcessor, 
@@ -11,6 +17,8 @@ from transformers import (
     T5Tokenizer, 
     T5EncoderModel,
 )
+
+from timm.models.vision_transformer import Mlp
 
 class MMDiTBlock(nn.Module):
     """
@@ -116,6 +124,7 @@ class DiT(nn.Module):
         self.num_spatial = num_patches // self.num_temporal
         self.num_heads = num_heads
         self.dtype = dtype
+        self.t_embedder = TimestepEmbedder(emb_size)
         self.text_tokenizer_1 = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
         self.text_model_1 = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32")
         self.text_tokenizer_2 = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
@@ -134,6 +143,7 @@ class DiT(nn.Module):
                 for _ in range(depth)
             ]
         )
+        self.t_model = TimestepEmbedder(emb_size)
         self.final_layer = FinalLayer(emb_size, np.prod(self.patch_size), self.out_channels) ###???
     
     def unpatchify(self, x):
@@ -149,8 +159,27 @@ class DiT(nn.Module):
     def x_embedding(self, noised_latent):
         return x
 
-    def y_embedding(self, Caption):
-        return y
+    def y_embedding(self, Caption, t):
+        t = torch.tensor(t, dtype=torch.int)
+
+        cap_emb_1 = self.text_tokenizer_1(text=Caption, return_tensors="pt", padding='max_length', max_length=77, truncation=True)
+        cap_emb_1 = self.text_model_1(**cap_emb_1)
+        text_emb_1 = cap_emb_1.last_hidden_state
+        # print(cap_emb_1.last_hidden_state.shape) # [2, 77, 512]
+
+        cap_emb_2 = self.text_tokenizer_2(text=Caption, return_tensors="pt", padding='max_length', max_length=77, truncation=True)
+        cap_emb_2 = self.text_model_1(**cap_emb_2)
+        text_emb_2 = cap_emb_2.last_hidden_state
+        # print(cap_emb_2.last_hidden_state.shape) # [2, 77, 512]
+
+        y_emb = torch.cat([text_emb_1, text_emb_2], dim=-1)
+        self.mlp_y = Mlp(
+            in_features=text_emb_1.shape[2] + text_emb_2.shape[2], hidden_features=self.emb_size, out_features=self.emb_size,  drop=0
+        )
+        y = self.mlp_y(y_emb)
+        t = self.t_embedder(t, dtype=y.dtype) ### There are some device issues; make sure to fix it in the future
+
+        return y + t.unsqueeze(1) 
     
     def c_embedding(self, Caption):
         cap_emb_1 = self.text_tokenizer_1(text=Caption, return_tensors="pt", padding='max_length', max_length=77, truncation=True)
@@ -186,7 +215,9 @@ def test():
     Caption = ["A photo of a cat", "A photo of a dog"]
     
     pack = DiT()
-    output = pack.c_embedding(Caption)
+    # output = pack.c_embedding(Caption)
+    # output = pack.y_embedding(Caption, t=[2,7])
+
     print(output.shape)
     # print(output_x.shape)
     return None
