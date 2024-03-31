@@ -96,7 +96,7 @@ class DiT(nn.Module):
             learn_sigma=True,
             condition="text",
             no_temporal_pos_emb=False,
-            caption_channels=512,
+            caption_channels=1024,
             model_max_length=77,
             dtype=torch.float32,
             enable_flashattn=False,
@@ -122,6 +122,7 @@ class DiT(nn.Module):
         self.text_model_2 = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14")
         self.text_tokenizer_3 = T5Tokenizer.from_pretrained("google/flan-t5-large")
         self.text_model_3 = T5EncoderModel.from_pretrained("google/flan-t5-large")
+        self.Linear_c = nn.Linear(caption_channels, emb_size)
         self.blocks = nn.ModuleList(
             [
                 MMDiTBlock(
@@ -145,6 +146,9 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, t * pt, h * ph, w * pw))
         return imgs
 
+    def x_embedding(self, noised_latent):
+        return x
+
     def y_embedding(self, Caption):
         return y
     
@@ -167,7 +171,9 @@ class DiT(nn.Module):
         assert  text_emb_1.shape[2] + text_emb_2.shape[2] == text_emb_3.shape[2] , 'You need to make sure their embedding size is the same (Due to memery issue, I did not follow the same T5-xxl model in the orignal paper)'
         output_embedding = torch.cat([torch.cat([text_emb_1, text_emb_2], dim=2), text_emb_3], dim=1)
 
-        return output_embedding
+        c = self.Linear_c(output_embedding)
+
+        return c
 
     def forward(self, x, t, Caption):
         return None
