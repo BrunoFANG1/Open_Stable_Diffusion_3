@@ -9,6 +9,8 @@ from openSD3.models.layers.blocks import (
     MultiHeadAttention, 
     FinalLayer,
     TimestepEmbedder,
+    get_2d_sincos_pos_embed,
+    get_1d_sincos_pos_embed,
 )
 
 from transformers import (
@@ -112,8 +114,9 @@ class DiT(nn.Module):
             enable_sequence_parallelism=False
     ):
         super().__init__()
+        self.device = torch.device("cuda")
         self.learn_sigma = learn_sigma
-        self.in_channels = in_channels   ##### Why input chanel is 4 instead of 3 (RGB)
+        self.in_channels = in_channels  
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
         self.emb_size = emb_size
         self.patch_size = patch_size
@@ -132,6 +135,9 @@ class DiT(nn.Module):
         self.text_tokenizer_3 = T5Tokenizer.from_pretrained("google/flan-t5-large")
         self.text_model_3 = T5EncoderModel.from_pretrained("google/flan-t5-large")
         self.Linear_c = nn.Linear(caption_channels, emb_size)
+        self.projection_layer = nn.Linear( in_channels* np.prod(patch_size), emb_size)
+        self.Temporal_Position_Embedding = self.get_temporal_pos_embed()
+        self.Spatial_Position_Embedding = self.get_spatial_pos_embed()
         self.blocks = nn.ModuleList(
             [
                 MMDiTBlock(
@@ -145,7 +151,28 @@ class DiT(nn.Module):
         )
         self.t_model = TimestepEmbedder(emb_size)
         self.final_layer = FinalLayer(emb_size, np.prod(self.patch_size), self.out_channels) ###???
-    
+        self.to(self.device)
+
+    def get_spatial_pos_embed(self):
+        pos_embed = get_2d_sincos_pos_embed(
+            self.hidden_size,
+            self.input_size[1] // self.patch_size[1],
+        )
+        pos_embed = torch.from_numpy(pos_embed).float().unsqueeze(0).requires_grad_(False)
+        return pos_embed
+
+    def get_temporal_pos_embed(self):
+        pos_embed = get_1d_sincos_pos_embed(
+            self.hidden_size,
+            self.input_size[0] // self.patch_size[0],
+        )
+        pos_embed = torch.from_numpy(pos_embed).float().unsqueeze(0).requires_grad_(False)
+        return pos_embed
+
+    def patchify(self, noised_latent):
+        noised_latent = einops.rearrange(noised_latent, 'b c (t n_t) (h n_h) (w n_w) -> b (t h w) (c n_t n_h n_w)', n_t=self.patch_size[0],  n_h=self.patch_size[1], n_w=self.patch_size[2])
+        return noised_latent
+
     def unpatchify(self, x):
         c = self.out_channels
         t, h, w = [self.input_size[i] // self.patch_size[i] for i in range(3)]
@@ -156,8 +183,19 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, t * pt, h * ph, w * pw))
         return imgs
 
-    def x_embedding(self, noised_latent):
+    def x_embedding(self, noised_latent): # noised_laent -> [B, C, T, H, W]
+        device = noised_latent.device  # Get the device of the input tensor
+        x = self.projection_layer(self.patchify(noised_latent))
+        if isinstance(self.Position_Embedding, torch.Tensor):
+            pos_embedding = self.Position_Embedding.to(device)  # Ensure Position_Embedding is on the same device
+        else:
+            # If Position_Embedding is not a tensor (e.g., a numpy array or list), first convert it to a tensor.
+            pos_embedding = torch.tensor(self.Position_Embedding, device=device)
+        print(pos_embedding.shape)
+        print(x.shape)
+        x += pos_embedding  # Now both tensors are guaranteed to be on the same device
         return x
+
 
     def y_embedding(self, Caption, t):
         t = torch.tensor(t, dtype=torch.int)
@@ -204,20 +242,23 @@ class DiT(nn.Module):
 
         return c
 
-    def forward(self, x, t, Caption):
-        return None
+    def forward(self, noised_latent, t, Caption):
+
+        x = self.x_embedding(noised_latent)
+        return x
 
 def test():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    xx = torch.rand(10,25,768).to(device)
+    xx = torch.rand(5,4, 16,32,32).to(device)
     cc = torch.rand(10,28,768).to(device)
     yy = torch.rand(10,768).to(device)
+    t = [2,7]
     Caption = ["A photo of a cat", "A photo of a dog"]
     
     pack = DiT()
     # output = pack.c_embedding(Caption)
     # output = pack.y_embedding(Caption, t=[2,7])
-
+    output = pack(xx, t, Caption)
     print(output.shape)
     # print(output_x.shape)
     return None
