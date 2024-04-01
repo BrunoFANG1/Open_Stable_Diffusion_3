@@ -62,11 +62,14 @@ class MMDiTBlock(nn.Module):
 
 
     def forward(self, y, c, x):
-        # y -> [batch_size, emd_size] ??? Not sure why
+        # y -> [batch_size, seq_len_caption, emd_size]
         # c -> [batch_size, seq_len_caption, emd_size]
         # x -> [batch_size, seq_len_img, emd_size]
         seq_len_c = c.shape[1]
-        alpha_c, beta_c, gamma_c, delta_c, epsilon_c, zeta_c, alpha_x, beta_x, gamma_x, delta_x, epsilon_x, zeta_x = self.adaLN_modulation(y).chunk(12, dim=1) # [batch_size, emd_size]
+
+        #### Not sure about torch.mean is correct or incorrect
+        alpha_c, beta_c, gamma_c, delta_c, epsilon_c, zeta_c, alpha_x, beta_x, gamma_x, delta_x, epsilon_x, zeta_x = self.adaLN_modulation(torch.mean(y, dim=1).squeeze(1)).chunk(12, dim=-1) # [batch_size, token_len ,emd_size]
+
         Q_c, K_c, V_c = self.QKV_c(modulate(self.norm1_c, c, alpha_c, beta_c)).chunk(3, dim=-1) 
         Q_x, K_x, V_x = self.QKV_x(modulate(self.norm1_x, x, alpha_x, beta_x)).chunk(3, dim=-1)
         
@@ -155,7 +158,7 @@ class DiT(nn.Module):
 
     def get_spatial_pos_embed(self):
         pos_embed = get_2d_sincos_pos_embed(
-            self.hidden_size,
+            self.emb_size,
             self.input_size[1] // self.patch_size[1],
         )
         pos_embed = torch.from_numpy(pos_embed).float().unsqueeze(0).requires_grad_(False)
@@ -163,7 +166,7 @@ class DiT(nn.Module):
 
     def get_temporal_pos_embed(self):
         pos_embed = get_1d_sincos_pos_embed(
-            self.hidden_size,
+            self.emb_size,
             self.input_size[0] // self.patch_size[0],
         )
         pos_embed = torch.from_numpy(pos_embed).float().unsqueeze(0).requires_grad_(False)
@@ -183,55 +186,50 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, t * pt, h * ph, w * pw))
         return imgs
 
-    def x_embedding(self, noised_latent): # noised_laent -> [B, C, T, H, W]
-        device = noised_latent.device  # Get the device of the input tensor
-        x = self.projection_layer(self.patchify(noised_latent))
-        if isinstance(self.Position_Embedding, torch.Tensor):
-            pos_embedding = self.Position_Embedding.to(device)  # Ensure Position_Embedding is on the same device
-        else:
-            # If Position_Embedding is not a tensor (e.g., a numpy array or list), first convert it to a tensor.
-            pos_embedding = torch.tensor(self.Position_Embedding, device=device)
-        print(pos_embedding.shape)
-        print(x.shape)
-        x += pos_embedding  # Now both tensors are guaranteed to be on the same device
+    def x_embedding(self, noised_latent):
+        x = self.patchify(noised_latent) # (B, S, N)
+        x = einops.rearrange(self.projection_layer(x), "b (t s) d -> b t s d", t = self.num_temporal, s=self.num_spatial)
+        x += self.Spatial_Position_Embedding.to(device=x.device, dtype=x.dtype)
+        x = einops.rearrange(x, "b t s d -> b s t d")
+        x += self.Temporal_Position_Embedding.to(device=x.device, dtype=x.dtype)
+        x = einops.rearrange(x, "b s t d -> b (t s) d")        
         return x
 
-
     def y_embedding(self, Caption, t):
-        t = torch.tensor(t, dtype=torch.int)
+        t = torch.tensor(t, dtype=torch.int).to(self.device)
 
         cap_emb_1 = self.text_tokenizer_1(text=Caption, return_tensors="pt", padding='max_length', max_length=77, truncation=True)
-        cap_emb_1 = self.text_model_1(**cap_emb_1)
+        cap_emb_1 = self.text_model_1(**cap_emb_1.to(self.device))
         text_emb_1 = cap_emb_1.last_hidden_state
         # print(cap_emb_1.last_hidden_state.shape) # [2, 77, 512]
 
         cap_emb_2 = self.text_tokenizer_2(text=Caption, return_tensors="pt", padding='max_length', max_length=77, truncation=True)
-        cap_emb_2 = self.text_model_1(**cap_emb_2)
+        cap_emb_2 = self.text_model_1(**cap_emb_2.to(self.device))
         text_emb_2 = cap_emb_2.last_hidden_state
         # print(cap_emb_2.last_hidden_state.shape) # [2, 77, 512]
 
         y_emb = torch.cat([text_emb_1, text_emb_2], dim=-1)
         self.mlp_y = Mlp(
             in_features=text_emb_1.shape[2] + text_emb_2.shape[2], hidden_features=self.emb_size, out_features=self.emb_size,  drop=0
-        )
-        y = self.mlp_y(y_emb)
-        t = self.t_embedder(t, dtype=y.dtype) ### There are some device issues; make sure to fix it in the future
+        ).to(self.device)
+        y = self.mlp_y(y_emb).to(self.device)
+        t = self.t_embedder(t, dtype=y.dtype).to(self.device) ### There are some device issues; make sure to fix it in the future
 
         return y + t.unsqueeze(1) 
     
     def c_embedding(self, Caption):
         cap_emb_1 = self.text_tokenizer_1(text=Caption, return_tensors="pt", padding='max_length', max_length=77, truncation=True)
-        cap_emb_1 = self.text_model_1(**cap_emb_1)
+        cap_emb_1 = self.text_model_1(**cap_emb_1.to(self.device))
         text_emb_1 = cap_emb_1.last_hidden_state
         # print(cap_emb_1.last_hidden_state.shape) # [2, 77, 512]
 
         cap_emb_2 = self.text_tokenizer_2(text=Caption, return_tensors="pt", padding='max_length', max_length=77, truncation=True)
-        cap_emb_2 = self.text_model_1(**cap_emb_2)
+        cap_emb_2 = self.text_model_1(**cap_emb_2.to(self.device))
         text_emb_2 = cap_emb_2.last_hidden_state
         # print(cap_emb_2.last_hidden_state.shape) # [2, 77, 512]
 
         cap_emb_3 = self.text_tokenizer_3(text=Caption, return_tensors="pt", padding='max_length', max_length=77, truncation=True) 
-        cap_emb_3 = self.text_model_3(input_ids=cap_emb_3['input_ids'], attention_mask=cap_emb_3['attention_mask'])       
+        cap_emb_3 = self.text_model_3(input_ids=cap_emb_3['input_ids'].to(self.device), attention_mask=cap_emb_3['attention_mask'].to(self.device))       
         # print(cap_emb_3.last_hidden_state.shape) # [2, 77, 1024]
         text_emb_3 = cap_emb_3.last_hidden_state
 
@@ -245,11 +243,19 @@ class DiT(nn.Module):
     def forward(self, noised_latent, t, Caption):
 
         x = self.x_embedding(noised_latent)
+        y = self.y_embedding(Caption, t)
+        c = self.c_embedding(Caption)
+
+        for block in self.blocks:
+            c, x = block(y, c, x)
+
+        x = self.final_layer(x, c)
+        x = self.unpatchify(x)
         return x
 
 def test():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    xx = torch.rand(5,4, 16,32,32).to(device)
+    xx = torch.rand(2,4, 16,32,32).to(device)
     cc = torch.rand(10,28,768).to(device)
     yy = torch.rand(10,768).to(device)
     t = [2,7]

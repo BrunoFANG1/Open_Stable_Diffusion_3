@@ -5,7 +5,7 @@ import math
 import numpy as np
 
 def modulate(norm_func, x, scale, shift):
-    # Suppose x is (B, N, D), shift is (B, D), scale is (B, D)
+    # Suppose x is (B, N, D), shift is (B,N, D), scale is (B, D)
     dtype = x.dtype
     x = norm_func(x.to(torch.float32)).to(dtype)
     x = x * (scale.unsqueeze(1) + 1) + shift.unsqueeze(1)
@@ -145,7 +145,7 @@ class FinalLayer(nn.Module):
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
 
     def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        shift, scale = self.adaLN_modulation(torch.mean(c, dim=1).squeeze(1)).chunk(2, dim=1)  # Why torch mean different from DiT
         x = modulate(self.norm_final, x, shift, scale)
         x = self.linear(x)
         return x
